@@ -1,0 +1,265 @@
+---
+title: "DU Crime: Evaluating Liquor Law Counts in September vs May"
+author: "Daniel Parada & Marnie Biando"
+date: 'March 16, 2018'
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+#Overview
+Our final project for COMP 4441 (Probability and Statistics for Data Science) investigates the mean counts for crime categories as reported to the Department of Crime at the University of Denver.  
+
+Our dataset includes 11 years of data (2007-2017), which at first glance seems like ample amounts of data.  However, once we looked into the data in greater detail, we found that, for the purposes of predicting the number of crimes for a given category and a given month, we would need to summarize data by crime category, by month, leaving us with one datapoint per year, or a total of 11 data points in each of our samples.  
+
+Plotting the trends of crime counts by category demonstrated that for certain categories, the samples did not follow a Normal distribution, hence our choice of Bias-Corrected and Accelerated (BCa) to calculate predicted means with confidence intervals.
+
+*Data and Research Question*  
+University of Denver's Campus Security Department publishes crime reports regularly and keeps in its records, no more than 11 years worth of data.  We obtained reports from Campus Security and found that crimes were categorized into over 26 categories of crime.
+
+Data cleanup included loading of data and code to parse data by category and subcategory.  We looked into several categories before identifying a few datasets to further investigate.
+
+We settled on the Liquor Laws category.  Our research question: is the average count of liquor laws broken higher at the beginning of the school year or at the end of the school year?  We hypothesized that the count would be higher at the beginning of the year, when students are still new to the school (and perhaps naive to liquor laws on campus).
+
+*Statistic: BCa Confidence Intervals*  
+Before jumping head first into the Bias-Corrected and Accelerated confidence intervals, let's take a step back and cover our bases. 
+
+Bootstrapping 101 : we have a sample with n numeric type elements ${x_1,x_2,...,x_n}$ from which we have calculated a statictic of interest noted $\theta$. From this sample we are going to resample it n times randomly with replacement and we do this N times, with N > 5000. Voila, now we have 5000 bootstrap distributions with n number of elements in each for each of which we also calculate our statistic of interest noted $\hat \theta_1^*, \hat \theta_2^*,...,\hat \theta_N^*$.
+
+The most intuitive way of calculating the confidence intervals we would use the percentile method where we use $100*\alpha^{th}$, as lower bound, and $100*(1-\alpha)^{th}$, as the upper bound. The Bias-Corrected Accelerated confidence interval is based on the percentile method but instead of using the percentile directly we will first take into account the skewness of our data, which would result in skewed bootstrap distributions.
+
+To take this into account we need to :
+
+- calculate the bias-correction parameter $\hat z_0$. With $\hat z_0$ is the proportion of the statistic of interest calculated on each the bootstrap samples, $\hat \theta_1^*,..., \hat \theta_N^*$, that is less than our sample data statistic, noted $\hat \theta^*$. 
+
+$\hat z_0 = \Phi^{-1} (\frac{\#(\hat \theta_b^*<\hat \theta)}{B})$
+
+with $\Phi^{-1}$ the inverse of the CDF (cummulative distribution function), $\#$ the number of times $\hat \theta_b^*$ (statistic of interest calculated on a bootstrap sample) is less than $\hat \theta$ (statistic of interest calculated on original sample).
+
+- calculate the acceleration parameter a, which corresponds to how far we are from the true value of the statistic of interest.
+
+$\hat a = \frac{\sum_{i=1}^n(\hat \theta_{(.)} - \hat \theta_{(i)})^3}{6(\sum_{i=1}^n(\hat \theta_{(.)} - \hat \theta_{(i)})^2)^{\frac{3}{2}}}$
+
+with $\sum_{i=1}^n(\hat \theta_{(.)} - \hat \theta_{(i)})^3$ the expected value and $\sum_{i=1}^n(\hat \theta_{(.)} - \hat \theta_{(i)})^2)^{\frac{3}{2}}$ being the variance.
+
+This results in an adjusted upper and lower bound for the confidence interval :
+
+$\alpha_1 = \Phi (\hat z_0 + \frac{\hat z_0 + z_{(\alpha)}}{1-\hat a (\hat z_0+z_{(\alpha)})})$
+
+$\alpha_2 = \Phi (\hat z_0 + \frac{\hat z_0 + z_{(1-\alpha)}}{1-\hat a (\hat z_0+z_{(1-\alpha)})})$
+
+## Loading of Dataset & Exploratory Data Analysis
+For the sake of brevity, the data for loading 10 years of campus crime reports has been left out of this report.  The R code below loads a cleaned up CSV file that was generated from filtering for Liquor Law Crime Counts from 2007 to 2017.
+
+A simple plot of the total liquor law counts reported by year shows definite skew in the data, making it perfect for applying BCa after 10,000 samples are generated from the sample data.
+
+```{r, echo=FALSE}
+# load pre-parsed dataset for Liquor Law violations, 2007-2017
+dat <- read_csv("22_LiquorLaws.csv")
+
+# transpose dataframe so that boot resampling function will sample by year (indices = rows)
+tpose <- t(dat)
+
+months <- as.data.frame(matrix(c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"), nrow=12, ncol=1))
+names(months) <- c("month")
+
+eda <- cbind(months, dat)
+eda <- eda %>%
+  gather('2007':'2017', key="year", value="counts")
+
+eda <- eda %>% filter(month %in% c("Jan", "May", "Sep", "Nov"))
+
+ggplot(data=eda, aes(x=year, y=counts)) +
+  geom_line(aes(group=month, color=month)) +
+  ggtitle("Liquor Law Violations Reported by Month")
+```
+
+
+## Boot Package in R: boot() and boot.ci() functions
+
+R contains a package "boot" which generates bootstrap replicates of your statistic of choice.
+
+The boot() function has several arguments, but the required ones are:  
+ - data (the data you will be resampling from)
+ - statistic (you must provide a function to calculate one or more statistics)
+ - R (number of replicates)
+
+boot() produces a 'bootobject' which is a collection of bootstrapped samples and the bootstrap statistic calculated form the bootstrapped samples.
+
+boot.ci() generates different types of confidence intervals, using different formulae for each: Normal, Basic, Studentized, Percentile, and BCa.
+
+### Function to Calculate Statistic
+
+In our case, we needed our function to calculate the mean of the crime counts.  After we figured out how indices work with the boot() function (indices tells the boot function how to apply the statistics to your dataset, by row or by column), we wrote two different functions to calculate means in one of two ways:
+(1) calculate bootstrapped means by the year: df[,indices]
+(2) calculate bootstrapped means by the month: df[indices,]
+
+The boot function generates the following output values:
+
+
+```{r, echo=FALSE}
+
+# load the boot package for boot function and boot.ci function
+library(boot)
+
+# Create statistical function to be used by boot() function
+byYear <- function(df, indices) {
+  ans <- apply(df[,indices],1,mean)
+  return (ans)
+}
+
+byMonth <- function(df, indices) {
+  ans <- apply(df[indices,],2,mean)
+  return (ans)
+}
+
+# Generate a boot object (in this case, two)
+bootYear <- boot(data = tpose, statistic = byYear, R=10000)
+bootMonth <- boot(data = tpose, statistic = byMonth, R=10000)
+
+# Output of your boot object
+names(bootYear)
+
+```
+
+## Visual of Bootstrapped Means
+
+Use bootobject$t to get the bootstrapped statistics for your bootobject:
+
+```{r, echo=FALSE}
+
+# Outputs the means calculated across the months:
+byYear <- as.data.frame(bootMonth$t)
+
+#by indexing into bootYear$t, you can pull the bootstrapped means of a specific month
+sept <- as.data.frame(bootMonth$t[,9])
+sept <- as.data.frame(sept)
+names(sept) <- c("sept_vals")
+# calculate REAL mean for september (divide by 11 for the number of years of data)
+septActual <- sum(tpose[,9])/11
+septBoot <- sum(sept)/10000
+# plot bootstrapped means for September
+ggplot(sept, aes(x=sept_vals)) + geom_histogram(binwidth=0.05) +
+  xlab("values for means") +
+  ggtitle("10,000 Bootstrapped Means of Liquor Law Reports (September)")
+
+#by indexing into bootYear$t, you can pull the means of a specific month:
+may <- as.data.frame(bootMonth$t[,5])
+may <- as.data.frame(may)
+names(may) <- c("may_vals")
+# calculate REAL mean for may
+mayActual <- sum(tpose[,5])/11
+mayBoot <- sum(may)/10000
+# plot bootstrapped means for May
+ggplot(may, aes(x=may_vals)) + geom_histogram(binwidth=0.05) +
+  xlab("values for means") +
+  ggtitle("10,000 Bootstrapped Means ofLiquor Law Reports (May)")
+
+```
+
+## Compute P-value for Bootstrapped Means
+
+To calculate the p-value, we apply the definition of p-value and count the number of bootstrapped means that are equal to or greater than our observed mean, the mean from our samples for September and May.
+
+$$p=\frac{1 + count(bootstrappedMeans_{month} >= sampleMean_{month})}{N}$$
+
+The p-values for our bootstrapped means for September and May are:
+
+```{r, echo=FALSE}
+
+sept_cts <- sept >= septActual
+(sept_pVal <- (1 + sum(sept_cts))/10000)
+
+may_cts <- may >= mayActual
+(may_pVal <- (1 + sum(may_cts))/10000)
+```
+
+
+## Using Boot.ci to Compute Confidence Intervals
+
+Once you have used boot to produce a boot object, you can now generate five different types of confidence intervals.
+
+```{r, echo=FALSE}
+
+# Use bootci to generate confidence intervals of all types
+boot.ci(bootMonth, conf=0.95, type="all")
+```
+
+### September: bootstrapped values versus actual values
+Here we call the boot.ci function and pass it the bootObject generated by the boot function.  The output of this function is the bootstrapped confidence intervals, which we apply to our previous graph of the 10,000 botstrapped means.  We also plotted the bootstrapped mean (mean of the means as well as the actual mean of our original sample:
+
+```{r, echo=FALSE}
+# Use bootci with the index to access a CI for a specific month
+septCI<-boot.ci(bootMonth, conf = 0.95, type = "all", index = 9)
+# group actual mean and boot mean
+v <- c(septActual, septBoot, septCI$bca[4], septCI$bca[5])
+vlines <- data.frame(xint = v, grp=c("actual", "boot", "lowerCI", "upperCI"))
+ggplot(sept, aes(x=sept_vals)) + geom_histogram(binwidth=0.05) +
+  xlab("bootstrapped means") +
+  geom_vline(data = vlines, aes(xintercept = xint, colour=grp)) +
+  ggtitle("Liquor Law Reports (September) with BCa Confidence Intervals")
+
+(septActual) # mean calculated from September sample
+(septBoot) # mean calculated from 10000 September bootstrapped means
+(septCI$bca[4]) #lower CI value
+(septCI$bca[5]) #upper CI value
+```
+
+### May: bootstrapped values versus actual values
+We repeat the same steps for the moth of May.
+
+```{r, echo=FALSE}
+# Use bootci with the index to access a CI for a specific month
+mayCI<-boot.ci(bootMonth, conf = 0.95, type = "all", index = 5)
+# group actual mean and boot mean
+m <- c(mayActual, mayBoot, mayCI$bca[4], mayCI$bca[5])
+mlines <- data.frame(xint = m, grp=c("actual", "boot", "lowerCI", "upperCI"))
+ggplot(may, aes(x=may_vals)) + geom_histogram(binwidth=0.05) +
+  xlab("bootstrapped means") +
+  geom_vline(data = mlines, aes(xintercept = xint, colour=grp)) +
+  ggtitle("Liquor Law Reports (May) with BCa Confidence Intervals")
+
+(mayActual) # mean calculated from September sample
+(mayBoot) # mean calculated from 10000 September bootstrapped means
+(mayCI$bca[4]) #lower CI value
+(mayCI$bca[5]) #upper CI value
+```
+
+## View of bootstrapped means across all 12 months
+
+Using the same methods we used to calculate a single bootstrapped mean (a mean of the means) for September and May, we can get a single value for all 12 months and compare the bootstrapped means to the actual means of our original dataset (11 year of data for all 12 months in each year).
+
+```{r, echo=FALSE}
+septActual <- sum(tpose[,9])/11
+septBoot <- sum(sept)/10000
+
+all_Actual <- as.data.frame(matrix(NA, nrow=12, ncol=1))
+all_Boot <- as.data.frame(matrix(NA, nrow=12, ncol=1))
+  
+for (i in 1:12) {
+  # calculate mean for each month from sample data
+  all_Actual[i,] <- (sum(tpose[,i]))/11
+  # calculate mean for each month from bootstrapped samples
+  month <- as.data.frame(bootMonth$t[,i])
+  all_Boot[i,] <- sum(month)/10000
+  print(sum(tpose[,i]))
+}
+names(all_Actual) <- c("actual means")
+names(all_Boot) <- c("boot means")
+
+(compare <- cbind(all_Actual, all_Boot))
+
+```
+
+# Conclusion
+Despite have a small sample (n=11), we were able to find a mean value for the number of liquor laws reported for any given month, based on 11 years of Liquor Law crime reports.
+
+Using our BCa intervals, we can conclude that 95% of the time the number of liquor laws reported in the months of September and May will be:
+September: 18.54545 - 23.72727  
+May: 7.727273 - 11.63636  
+
+There is no overlap between these ranges, so we can say definitively that the number of liquor laws in September will be greater than the number of liquor laws broken in May.
